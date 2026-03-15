@@ -320,6 +320,15 @@ def build_dashboard():
   if raw_state == "FINISH" and not alerted_finish:
     ding(f"PRINT DONE — {filename}", "done")
     alerted_finish = True
+    # log to history
+    history_path = os.path.expanduser("~/.local/share/3dprint-history.log")
+    os.makedirs(os.path.dirname(history_path), exist_ok=True)
+    elapsed_str_log = ""
+    if print_start_time:
+      el = int((datetime.now() - print_start_time).total_seconds())
+      elapsed_str_log = f" | {el//3600}h{(el%3600)//60}m"
+    with open(history_path, "a") as f:
+      f.write(f"{datetime.now().isoformat(timespec='seconds')} | {filename} | L{layer}/{total_layers}{elapsed_str_log}\n")
 
   if raw_state == "RUNNING" and last_state in ("FINISH", "FAILED", "IDLE", ""):
     alerted_finish = False
