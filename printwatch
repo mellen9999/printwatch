@@ -316,3 +316,60 @@ def main():
     help="MQTT port (default: 8883)")
   parser.add_argument("--version", action="version", version=f"printwatch {__version__}")
   args = parser.parse_args()
+
+  if not args.ip or not args.code or not args.id:
+    parser.print_usage()
+    print("\nrequired: --ip, --code, --id (or set BAMBU_IP, BAMBU_ACCESS_CODE, BAMBU_DEVICE_ID)")
+    print("\nexample:")
+    print("  printwatch --ip 192.168.1.100 --code 12345678 --id 0300CA612002150")
+    sys.exit(1)
+
+  device_id = args.id
+  console = Console()
+
+  client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="printwatch")
+  client.username_pw_set("bblp", args.code)
+  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE
+  client.tls_set_context(ctx)
+  client.on_connect = on_connect
+  client.on_disconnect = on_disconnect
+  client.on_message = on_message
+  client.reconnect_delay_set(min_delay=1, max_delay=30)
+
+  try:
+    client.connect(args.ip, args.port, 60)
+  except Exception as e:
+    console.print(f"[red]cannot connect to {args.ip}:{args.port}: {e}[/]")
+    console.print(f"[dim]is the printer on? is LAN mode enabled?[/]")
+    sys.exit(1)
+
+  client.loop_start()
+
+  def cleanup(sig=None, frame=None):
+    client.loop_stop()
+    client.disconnect()
+    sys.exit(0)
+
+  signal.signal(signal.SIGINT, cleanup)
+  signal.signal(signal.SIGTERM, cleanup)
+
+  console.print("[dim]connecting to printer…[/]")
+  for _ in range(50):
+    if status:
+      break
+    time.sleep(0.1)
+
+  with Live(build_dashboard(), console=console, refresh_per_second=2,
+            screen=True) as live:
+    while True:
+      try:
+        live.update(build_dashboard())
+        time.sleep(0.5)
+      except KeyboardInterrupt:
+        cleanup()
+
+
+if __name__ == "__main__":
+  main()
