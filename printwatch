@@ -272,14 +272,14 @@ def camera_loop(host, access_code, interval=3):
         if frame_count % 5 == 0:
           shutil.copy(raw_path, prev_path)
 
-        # render — fit to terminal, don't clear until new frame is ready
+        # render — fit exactly to pane
         try:
-          cols = os.get_terminal_size().columns
-          rows = os.get_terminal_size().lines - 1
+          sz = os.get_terminal_size()
+          size = f"{sz.columns}x{sz.lines - 1}"
         except OSError:
-          cols, rows = 80, 24
+          size = "80x20"
         output = subprocess.run(
-          [renderer, "-s", f"{cols}x{rows}", "--animate", "off", hud_path],
+          [renderer, "-s", size, "--animate", "off", hud_path],
           capture_output=True, timeout=5)
         if output.stdout:
           sys.stdout.write("\033[H")  # cursor to top (no clear — reduces flicker)
