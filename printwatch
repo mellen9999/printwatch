@@ -61,9 +61,23 @@ STATES = {
 }
 
 
-def ding(msg):
+SOUNDS = {
+  "done":  "/usr/share/sounds/freedesktop/stereo/complete.oga",
+  "error": "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
+  "warn":  "/usr/share/sounds/freedesktop/stereo/bell.oga",
+}
+
+def ding(msg, level="error"):
   sys.stdout.write("\a")
   sys.stdout.flush()
+  # play sound through pipewire/pulseaudio (audible through IEMs)
+  sound = SOUNDS.get(level, SOUNDS["error"])
+  if os.path.exists(sound):
+    for player in ("pw-play", "paplay", "aplay"):
+      if shutil.which(player):
+        subprocess.Popen([player, sound],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        break
   try:
     subprocess.Popen(["notify-send", "-u", "critical", "printwatch", msg],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -304,7 +318,7 @@ def build_dashboard():
       alerted_fail = True
 
   if raw_state == "FINISH" and not alerted_finish:
-    ding(f"PRINT DONE — {filename}")
+    ding(f"PRINT DONE — {filename}", "done")
     alerted_finish = True
 
   if raw_state == "RUNNING" and last_state in ("FINISH", "FAILED", "IDLE", ""):
@@ -323,7 +337,7 @@ def build_dashboard():
       f"layer {layer} unchanged for {stuck_min}m — nozzle may be jammed"))
     has_alerts = True
     if not alerted_stuck:
-      ding(f"POSSIBLY STUCK on layer {layer} for {stuck_min}m")
+      ding(f"POSSIBLY STUCK on layer {layer} for {stuck_min}m", "warn")
       alerted_stuck = True
 
   if error_log:
