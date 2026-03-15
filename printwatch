@@ -289,6 +289,21 @@ def build_dashboard():
     for e in error_log[-5:]:
       lines.append(Text.from_markup(f"    [red]●[/] {e}"))
 
+  # print history
+  history_path = os.path.expanduser("~/.local/share/3dprint-history.log")
+  try:
+    with open(history_path) as f:
+      history = f.readlines()[-3:]
+    if history:
+      lines.append(Text(""))
+      lines.append(Text.from_markup(f"  [bold]recent prints[/]"))
+      for entry in history:
+        entry = entry.strip()
+        if entry:
+          lines.append(Text.from_markup(f"    [dim]{entry}[/]"))
+  except FileNotFoundError:
+    pass
+
   if not has_alerts and not error_log:
     lines.append(Text(""))
 
