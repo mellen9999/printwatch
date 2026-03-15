@@ -272,12 +272,19 @@ def camera_loop(host, access_code, interval=3):
         if frame_count % 5 == 0:
           shutil.copy(raw_path, prev_path)
 
-        # render
-        sys.stdout.write("\033[2J\033[H")
-        sys.stdout.flush()
-        subprocess.run([renderer, "-s", f"{cols}x", "--animate", "off", hud_path],
-                       stdout=sys.stdout, stderr=subprocess.DEVNULL)
-        sys.stdout.flush()
+        # render — fit to terminal, don't clear until new frame is ready
+        try:
+          cols = os.get_terminal_size().columns
+          rows = os.get_terminal_size().lines - 1
+        except OSError:
+          cols, rows = 80, 24
+        output = subprocess.run(
+          [renderer, "-s", f"{cols}x{rows}", "--animate", "off", hud_path],
+          capture_output=True, timeout=5)
+        if output.stdout:
+          sys.stdout.write("\033[H")  # cursor to top (no clear — reduces flicker)
+          sys.stdout.write(output.stdout.decode(errors="replace"))
+          sys.stdout.flush()
 
         fails = 0
         frame_count += 1
