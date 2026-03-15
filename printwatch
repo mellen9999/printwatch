@@ -340,7 +340,7 @@ def build_dashboard():
     history.reverse()
     if history:
       lines.append(Text(""))
-      lines.append(Text.from_markup(f"  [bold]recent prints[/]"))
+      lines.append(Text.from_markup(f"  [bold]history[/]"))
       for entry in history:
         entry = entry.strip()
         if entry:
