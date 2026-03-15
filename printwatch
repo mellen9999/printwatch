@@ -574,7 +574,7 @@ def main():
     script = os.path.abspath(sys.argv[0])
     cam_cmd = f"{script} --camera-only --ip {args.ip} --code {args.code} --camera-interval {args.camera_interval}"
     if os.environ.get("TMUX"):
-      subprocess.Popen(["tmux", "split-window", "-h", "-l", "50%", cam_cmd],
+      subprocess.Popen(["tmux", "split-window", "-v", "-l", "50%", cam_cmd],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
       print("--camera requires tmux (auto-splits a camera pane)")
