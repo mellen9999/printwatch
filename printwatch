@@ -2,7 +2,7 @@
 # printwatch — real-time Bambu Lab printer monitor for the terminal
 # https://github.com/mellen/printwatch
 
-import argparse, os, ssl, json, time, sys, signal, subprocess
+import argparse, os, ssl, json, time, sys, signal, subprocess, shutil
 from datetime import datetime, timedelta
 import paho.mqtt.client as mqtt
 from rich.live import Live
