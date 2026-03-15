@@ -211,21 +211,29 @@ def build_dashboard():
     if first_print_layer_time is None and layer >= 2:
       first_print_layer_time = now
 
-    # calculate ETA from actual elapsed time per layer (skip layer 1 — it's slow)
+    # calculate ETA — use our own timing if we have enough data,
+    # otherwise fall back to firmware estimate
     if first_print_layer_time and layer >= 3 and total_layers > 0:
       elapsed = (now - first_print_layer_time).total_seconds()
-      layers_done = layer - 2  # layers since we started timing
+      layers_done = layer - 2
       layers_left = total_layers - layer
-      if layers_done > 0:
+      if layers_done > 0 and elapsed > 10:
         secs_per_layer = elapsed / layers_done
         eta_secs = int(secs_per_layer * layers_left)
         eta_h = eta_secs // 3600
         eta_m = (eta_secs % 3600) // 60
         eta_str = f"{eta_h}h {eta_m}m left" if eta_h > 0 else f"{eta_m}m left"
+      elif remaining > 0:
+        hrs = remaining // 60
+        mins = remaining % 60
+        eta_str = f"~{hrs}h {mins}m left" if hrs > 0 else f"~{mins}m left"
       else:
         eta_str = "calculating…"
-    elif remaining > 0 and layer < 3:
-      eta_str = "calibrating ETA…"
+    elif remaining > 0:
+      # no own timing yet — use firmware estimate (prefix ~ to show it's approximate)
+      hrs = remaining // 60
+      mins = remaining % 60
+      eta_str = f"~{hrs}h {mins}m left" if hrs > 0 else f"~{mins}m left"
     else:
       eta_str = "calculating…"
 
