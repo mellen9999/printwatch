@@ -12,7 +12,6 @@ real-time terminal monitor for Bambu Lab 3D printers. connects via LAN mode MQTT
 - alerts on failure, filament issues, clogs
 - stuck detection (warns if same layer for 10+ minutes)
 - terminal bell + desktop notification on print done/failed
-- live camera feed via sixel graphics (foot, xterm, etc.)
 - works over LAN only — no Bambu Cloud needed
 
 ## setup
@@ -36,30 +35,6 @@ export BAMBU_IP=192.168.1.100
 export BAMBU_ACCESS_CODE=12345678
 export BAMBU_DEVICE_ID=01P00A000000000
 printwatch
-```
-
-## camera
-
-live camera feed in the terminal via sixel graphics. requires `img2sixel` (libsixel) and a sixel-capable terminal (foot, xterm, mintty, mlterm).
-
-```
-# in tmux: auto-splits a camera pane alongside the dashboard
-printwatch --ip ... --code ... --id ... --camera
-
-# standalone camera feed (for a separate terminal/pane)
-printwatch --camera-only --ip ... --code ...
-
-# adjust frame rate (default 3s)
-printwatch --camera --camera-interval 5 ...
-```
-
-install sixel support:
-```
-# arch
-paru -S libsixel
-
-# debian/ubuntu
-apt install libsixel-bin
 ```
 
 ## compatible printers
