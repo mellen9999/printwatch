@@ -130,18 +130,31 @@ def grab_frame(host, access_code, output_path="/tmp/printwatch_frame.jpg", timeo
 
 
 def camera_loop(host, access_code, interval=3):
-  """continuous camera feed — grabs frames and displays via img2sixel"""
-  img2sixel = shutil.which("img2sixel")
-  if not img2sixel:
-    print("img2sixel not found — install libsixel for camera support")
-    print("  arch: paru -S libsixel")
-    print("  debian: apt install libsixel-bin")
-    sys.exit(1)
+  """continuous camera feed — uses chafa (block chars) or img2sixel (sixel)"""
+  # prefer chafa (works everywhere) — fall back to img2sixel (sixel terminals only)
+  renderer = shutil.which("chafa")
+  if renderer:
+    render_cmd = lambda path, cols: [renderer, "-s", f"{cols}x", "--animate", "off", path]
+  else:
+    renderer = shutil.which("img2sixel")
+    if renderer:
+      render_cmd = lambda path, cols: [renderer, "-w", str(cols * 10), path]
+    else:
+      print("install chafa or img2sixel for camera support")
+      print("  arch: paru -S chafa")
+      print("  debian: apt install chafa")
+      sys.exit(1)
 
   frame_path = "/tmp/printwatch_frame.jpg"
   sys.stdout.write("\033[2J\033[H")
   sys.stdout.write("connecting to camera…\n")
   sys.stdout.flush()
+
+  # get terminal width
+  try:
+    cols = os.get_terminal_size().columns
+  except OSError:
+    cols = 80
 
   fails = 0
   while True:
@@ -149,9 +162,8 @@ def camera_loop(host, access_code, interval=3):
       if grab_frame(host, access_code, frame_path, timeout=8):
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
-        subprocess.run([img2sixel, "-w", "auto", "-h", "auto", frame_path],
+        subprocess.run(render_cmd(frame_path, cols),
                        stdout=sys.stdout, stderr=subprocess.DEVNULL)
-        # status line below image
         now = datetime.now().strftime('%H:%M:%S')
         sys.stdout.write(f"\n  printwatch cam · {now} · {interval}s refresh\n")
         sys.stdout.flush()
