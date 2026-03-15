@@ -213,13 +213,16 @@ def build_dashboard():
 
   if raw_state == "FINISH":
     if bed > 30:
-      finish_msg = f"bed cooling… {bed:.0f}°C → remove at 25°C"
-      finish_style = "yellow"
+      lines.append(Text.from_markup(
+        f"  [bold yellow]bed cooling… {bed:.0f}°C → remove at 25°C[/]"))
     else:
-      finish_msg = "ready — flex the plate to pop it off"
-      finish_style = "bold cyan"
+      lines.append(Text.from_markup(
+        f"  [bold cyan]ready — flex the plate to pop it off[/]"))
+    lines.append(Text(""))
     lines.append(Text.from_markup(
-      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%[/]  [{finish_style}]{finish_msg}[/]"))
+      f"  [bold]file[/]     {filename}"))
+    lines.append(Text.from_markup(
+      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%  complete[/]"))
     if total_layers > 0:
       lines.append(Text.from_markup(
         f"  [bold]layer[/]    {total_layers} of {total_layers}  (100%)"))
