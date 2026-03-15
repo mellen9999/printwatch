@@ -427,15 +427,19 @@ def main():
 
   device_id = args.id
 
-  # --camera: auto-spawn a tmux pane with the camera feed
-  if args.camera and os.environ.get("TMUX"):
+  # --camera: spawn camera feed in a separate foot window
+  if args.camera:
     script = os.path.abspath(sys.argv[0])
     cam_cmd = f"{script} --camera-only --ip {args.ip} --code {args.code} --camera-interval {args.camera_interval}"
-    subprocess.Popen(["tmux", "split-window", "-h", "-l", "50%", cam_cmd],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-  elif args.camera and not os.environ.get("TMUX"):
-    print("[dim]--camera works best in tmux (auto-splits a camera pane)")
-    print("without tmux, use --camera-only in a separate terminal[/dim]")
+    foot = shutil.which("foot")
+    if foot:
+      subprocess.Popen([foot, "--title=printwatch-cam", "-e", "bash", "-c", cam_cmd],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif os.environ.get("TMUX"):
+      subprocess.Popen(["tmux", "split-window", "-h", "-l", "50%", cam_cmd],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+      print("tip: run 'printwatch --camera-only' in a separate terminal")
 
   console = Console()
 
