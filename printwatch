@@ -52,7 +52,7 @@ STAGES = {
 
 STATES = {
   "RUNNING":  ("PRINTING",     "bold green",  ""),
-  "FINISH":   ("DONE",         "bold cyan",   "remove from bed"),
+  "FINISH":   ("DONE",         "bold cyan",   ""),
   "FAILED":   ("FAILED",       "bold red",    "check the printer"),
   "PAUSE":    ("PAUSED",       "bold yellow", "resume from touchscreen"),
   "IDLE":     ("IDLE",         "dim",         ""),
@@ -277,8 +277,14 @@ def build_dashboard():
       print_start_time = None
       first_print_layer_time = None
   elif raw_state == "FINISH":
+    if bed > 30:
+      finish_msg = f"bed cooling… {bed:.0f}°C → remove at 25°C"
+      finish_style = "yellow"
+    else:
+      finish_msg = "ready — flex the plate to pop it off"
+      finish_style = "bold cyan"
     lines.append(Text.from_markup(
-      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%  complete![/]"))
+      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%[/]  [{finish_style}]{finish_msg}[/]"))
 
   lines.append(Text(""))
   lines.append(Text.from_markup(f"  [bold]nozzle[/]   {temp_gauge(nozzle, nozzle_t)}"))
