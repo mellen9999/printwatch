@@ -139,16 +139,33 @@ def camera_loop(host, access_code, interval=3):
     sys.exit(1)
 
   frame_path = "/tmp/printwatch_frame.jpg"
-  print("\033[2J\033[H", end="")  # clear screen
-  print("connecting to camera…")
+  sys.stdout.write("\033[2J\033[H")
+  sys.stdout.write("connecting to camera…\n")
+  sys.stdout.flush()
 
+  fails = 0
   while True:
-    if grab_frame(host, access_code, frame_path):
-      # clear screen, move cursor to top, render sixel
-      sys.stdout.write("\033[H")
-      sys.stdout.flush()
-      subprocess.run([img2sixel, "-w", "640", frame_path],
-                     stdout=sys.stdout, stderr=subprocess.DEVNULL)
+    try:
+      if grab_frame(host, access_code, frame_path, timeout=8):
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+        subprocess.run([img2sixel, "-w", "auto", "-h", "auto", frame_path],
+                       stdout=sys.stdout, stderr=subprocess.DEVNULL)
+        # status line below image
+        now = datetime.now().strftime('%H:%M:%S')
+        sys.stdout.write(f"\n  printwatch cam · {now} · {interval}s refresh\n")
+        sys.stdout.flush()
+        fails = 0
+      else:
+        fails += 1
+        if fails <= 3:
+          sys.stdout.write(f"\r  retrying camera ({fails})…")
+          sys.stdout.flush()
+        elif fails == 4:
+          sys.stdout.write("\n  camera not responding — will keep trying\n")
+          sys.stdout.flush()
+    except Exception as e:
+      sys.stdout.write(f"\r  camera error: {e}\n")
       sys.stdout.flush()
     time.sleep(interval)
 
