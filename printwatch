@@ -337,6 +337,7 @@ def build_dashboard():
   try:
     with open(history_path) as f:
       history = f.readlines()[-3:]
+    history.reverse()
     if history:
       lines.append(Text(""))
       lines.append(Text.from_markup(f"  [bold]recent prints[/]"))
