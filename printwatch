@@ -24,6 +24,8 @@ alerted_finish = False
 alerted_fail = False
 alerted_stuck = False
 device_id = ""
+print_start_time = None
+first_print_layer_time = None
 
 STUCK_THRESHOLD = 600
 
@@ -196,29 +198,62 @@ def build_dashboard():
   lines.append(Text.from_markup(f"  [bold]file[/]     {filename}"))
 
   if raw_state in ("RUNNING", "PAUSE") or pct > 0:
+    global print_start_time, first_print_layer_time
     if total_layers > 0 and layer > 0:
       real_pct = int(layer / total_layers * 100)
     else:
       real_pct = pct
+
+    # track timing for accurate ETA
+    now = datetime.now()
+    if print_start_time is None and raw_state == "RUNNING":
+      print_start_time = now
+    if first_print_layer_time is None and layer >= 2:
+      first_print_layer_time = now
+
+    # calculate ETA from actual elapsed time per layer (skip layer 1 — it's slow)
+    if first_print_layer_time and layer >= 3 and total_layers > 0:
+      elapsed = (now - first_print_layer_time).total_seconds()
+      layers_done = layer - 2  # layers since we started timing
+      layers_left = total_layers - layer
+      if layers_done > 0:
+        secs_per_layer = elapsed / layers_done
+        eta_secs = int(secs_per_layer * layers_left)
+        eta_h = eta_secs // 3600
+        eta_m = (eta_secs % 3600) // 60
+        eta_str = f"{eta_h}h {eta_m}m left" if eta_h > 0 else f"{eta_m}m left"
+      else:
+        eta_str = "calculating…"
+    elif remaining > 0 and layer < 3:
+      eta_str = "calibrating ETA…"
+    else:
+      eta_str = "calculating…"
+
+    # elapsed time
+    if print_start_time:
+      elapsed_total = int((now - print_start_time).total_seconds())
+      el_h = elapsed_total // 3600
+      el_m = (elapsed_total % 3600) // 60
+      elapsed_str = f"{el_h}h {el_m}m" if el_h > 0 else f"{el_m}m"
+    else:
+      elapsed_str = "0m"
 
     bar_w = 30
     bar_filled = int(real_pct / 100 * bar_w)
     bar = "█" * bar_filled + "░" * (bar_w - bar_filled)
     pct_color = "green" if real_pct > 0 else "dim"
 
-    if remaining > 0:
-      hrs = remaining // 60
-      mins = remaining % 60
-      eta_str = f"{hrs}h {mins}m left" if hrs > 0 else f"{mins}m left"
-    else:
-      eta_str = "calculating…"
-
     lines.append(Text.from_markup(
       f"  [bold]done[/]     [{pct_color}]{bar}[/]  [bold]{real_pct}%[/]  {eta_str}"))
 
     if total_layers > 0:
       lines.append(Text.from_markup(
-        f"  [bold]layer[/]    {layer} of {total_layers}  ({layer/total_layers*100:.0f}%)"))
+        f"  [bold]layer[/]    {layer} of {total_layers}  ({layer/total_layers*100:.0f}%)  elapsed {elapsed_str}"))
+
+    # reset timing when print finishes
+    if raw_state in ("FINISH", "FAILED", "IDLE"):
+      print_start_time = None
+      first_print_layer_time = None
   elif raw_state == "FINISH":
     lines.append(Text.from_markup(
       f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%  complete![/]"))
