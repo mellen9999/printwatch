@@ -2,9 +2,10 @@
 # printwatch — real-time Bambu Lab printer monitor for the terminal
 # https://github.com/mellen/printwatch
 
-import argparse, os, ssl, json, time, sys, signal, subprocess, struct, socket, threading, shutil
+import argparse, os, ssl, json, time, sys, signal, subprocess, struct, socket, shutil
 from datetime import datetime, timedelta
 import paho.mqtt.client as mqtt
+from PIL import Image, ImageDraw, ImageFont
 from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
@@ -129,45 +130,157 @@ def grab_frame(host, access_code, output_path="/tmp/printwatch_frame.jpg", timeo
   return False
 
 
-def camera_loop(host, access_code, interval=3):
-  """continuous camera feed — uses chafa (block chars) or img2sixel (sixel)"""
-  # prefer chafa (works everywhere) — fall back to img2sixel (sixel terminals only)
-  renderer = shutil.which("chafa")
-  if renderer:
-    render_cmd = lambda path, cols: [renderer, "-s", f"{cols}x", "--animate", "off", path]
-  else:
-    renderer = shutil.which("img2sixel")
-    if renderer:
-      render_cmd = lambda path, cols: [renderer, "-w", str(cols * 10), path]
-    else:
-      print("install chafa or img2sixel for camera support")
-      print("  arch: paru -S chafa")
-      print("  debian: apt install chafa")
-      sys.exit(1)
+def overlay_stats(frame_path, out_path, print_status):
+  """burn print stats + alerts onto the camera frame"""
+  try:
+    img = Image.open(frame_path)
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
 
-  frame_path = "/tmp/printwatch_frame.jpg"
+    state = print_status.get("gcode_state", "?")
+    pct_val = print_status.get("mc_percent", 0)
+    layer = print_status.get("layer_num", 0)
+    total = print_status.get("total_layer_num", 0)
+    remaining = print_status.get("mc_remaining_time", 0)
+    nozzle = print_status.get("nozzle_temper", 0)
+    bed = print_status.get("bed_temper", 0)
+    filename = print_status.get("subtask_name", "")
+    hms = print_status.get("hms", [])
+    error = print_status.get("print_error", 0)
+
+    if total > 0 and layer > 0:
+      pct = int(layer / total * 100)
+    else:
+      pct = pct_val
+
+    if remaining > 0:
+      hrs, mins = remaining // 60, remaining % 60
+      eta = f"{hrs}h{mins}m" if hrs > 0 else f"{mins}m"
+    else:
+      eta = "--"
+
+    # try to load a nice font, fall back to default
+    try:
+      font = ImageFont.truetype("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 24)
+      font_sm = ImageFont.truetype("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 18)
+    except (OSError, IOError):
+      font = ImageFont.load_default()
+      font_sm = font
+
+    # semi-transparent overlay bar at the bottom
+    bar_h = 70
+    overlay = Image.new("RGBA", (w, bar_h), (0, 0, 0, 180))
+    img.paste(overlay, (0, h - bar_h), overlay)
+
+    # progress bar
+    bar_y = h - bar_h + 8
+    bar_x = 10
+    bar_w = w - 20
+    bar_fill = int(pct / 100 * bar_w)
+    # bar background
+    draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + 14], fill=(60, 60, 60))
+    # bar fill
+    color = (0, 200, 0) if state == "RUNNING" else (0, 200, 200) if state == "FINISH" else (200, 0, 0) if state == "FAILED" else (100, 100, 100)
+    if bar_fill > 0:
+      draw.rectangle([bar_x, bar_y, bar_x + bar_fill, bar_y + 14], fill=color)
+
+    # text line 1: state + progress
+    text_y = bar_y + 20
+    state_text = f"{state}  {pct}%  ETA {eta}  L{layer}/{total}"
+    draw.text((bar_x, text_y), state_text, fill=(255, 255, 255), font=font_sm)
+
+    # text line 2: temps + file
+    text_y2 = text_y + 20
+    info_text = f"nozzle {nozzle:.0f}°  bed {bed:.0f}°  {filename}"
+    draw.text((bar_x, text_y2), info_text, fill=(200, 200, 200), font=font_sm)
+
+    # timestamp top-right
+    now = datetime.now().strftime('%H:%M:%S')
+    draw.text((w - 110, 8), now, fill=(255, 255, 255), font=font_sm)
+
+    # alerts — big red text at top
+    alerts = []
+    if state == "FAILED":
+      alerts.append(f"PRINT FAILED layer {layer}/{total}")
+    if error and error != 0:
+      alerts.append(f"ERROR {error}")
+    for h_item in hms:
+      code = h_item.get("attr", 0)
+      hex_code = f"{code:04X}" if isinstance(code, int) else str(code)
+      desc = HMS_CODES.get(hex_code[:4], f"error {hex_code}")
+      alerts.append(desc)
+
+    for i, alert in enumerate(alerts[:3]):
+      alert_y = 10 + i * 30
+      draw.rectangle([0, alert_y, w, alert_y + 28], fill=(200, 0, 0))
+      draw.text((10, alert_y + 2), f"⚠ {alert}", fill=(255, 255, 255), font=font)
+
+    img.save(out_path, "JPEG", quality=85)
+  except Exception:
+    # if overlay fails, just copy the raw frame
+    shutil.copy(frame_path, out_path)
+
+
+def frame_diff(path_a, path_b, threshold=30):
+  """compare two frames — returns % of pixels that changed significantly"""
+  try:
+    a = Image.open(path_a).convert("L").resize((160, 100))
+    b = Image.open(path_b).convert("L").resize((160, 100))
+    pixels_a = list(a.getdata())
+    pixels_b = list(b.getdata())
+    changed = sum(1 for pa, pb in zip(pixels_a, pixels_b) if abs(pa - pb) > threshold)
+    return changed / len(pixels_a) * 100
+  except Exception:
+    return 0
+
+
+def camera_loop(host, access_code, interval=3):
+  """live camera with HUD overlay + change detection"""
+  renderer = shutil.which("chafa")
+  if not renderer:
+    print("install chafa for camera: paru -S chafa")
+    sys.exit(1)
+
+  raw_path = "/tmp/printwatch_raw.jpg"
+  hud_path = "/tmp/printwatch_hud.jpg"
+  prev_path = "/tmp/printwatch_prev.jpg"
+
   sys.stdout.write("\033[2J\033[H")
   sys.stdout.write("connecting to camera…\n")
   sys.stdout.flush()
 
-  # get terminal width
   try:
     cols = os.get_terminal_size().columns
   except OSError:
     cols = 80
 
   fails = 0
+  frame_count = 0
   while True:
     try:
-      if grab_frame(host, access_code, frame_path, timeout=8):
+      if grab_frame(host, access_code, raw_path, timeout=8):
+        # overlay stats onto the frame
+        overlay_stats(raw_path, hud_path, status)
+
+        # change detection (every 5th frame after first 10)
+        if frame_count > 10 and frame_count % 5 == 0 and os.path.exists(prev_path):
+          diff = frame_diff(prev_path, raw_path)
+          if diff > 40:
+            ding(f"BIG CHANGE detected ({diff:.0f}% pixels) — check printer!")
+
+        # save for next comparison
+        if frame_count % 5 == 0:
+          shutil.copy(raw_path, prev_path)
+
+        # render
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
-        subprocess.run(render_cmd(frame_path, cols),
+        subprocess.run([renderer, "-s", f"{cols}x", "--animate", "off", hud_path],
                        stdout=sys.stdout, stderr=subprocess.DEVNULL)
-        now = datetime.now().strftime('%H:%M:%S')
-        sys.stdout.write(f"\n  printwatch cam · {now} · {interval}s refresh\n")
         sys.stdout.flush()
+
         fails = 0
+        frame_count += 1
       else:
         fails += 1
         if fails <= 3:
