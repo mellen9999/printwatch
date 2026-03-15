@@ -2,7 +2,7 @@
 # printwatch — real-time Bambu Lab printer monitor for the terminal
 # https://github.com/mellen/printwatch
 
-import argparse, os, ssl, json, time, sys, signal, subprocess
+import argparse, os, ssl, json, time, sys, signal, subprocess, struct, socket, threading, shutil
 from datetime import datetime, timedelta
 import paho.mqtt.client as mqtt
 from rich.live import Live
@@ -67,6 +67,90 @@ def ding(msg):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   except FileNotFoundError:
     pass
+
+
+def grab_frame(host, access_code, output_path="/tmp/printwatch_frame.jpg", timeout=5):
+  """grab a single JPEG frame from the Bambu camera (port 6000)"""
+  try:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    sock = socket.create_connection((host, 6000), timeout=timeout)
+    ssock = ctx.wrap_socket(sock)
+
+    # auth: 80-byte payload
+    auth = bytearray(80)
+    struct.pack_into('<I', auth, 0, 0x40)
+    struct.pack_into('<I', auth, 4, 0x3000)
+    auth[16:16+4] = b'bblp'
+    code_bytes = access_code.encode('ascii')
+    auth[48:48+len(code_bytes)] = code_bytes
+    ssock.send(bytes(auth))
+
+    # read frames — 16-byte header then JPEG payload
+    pending = b''
+    payload_size = 0
+    frame_buf = None
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+      chunk = ssock.recv(8192)
+      if not chunk:
+        break
+      pending += chunk
+
+      while len(pending) > 0:
+        if frame_buf is None:
+          if len(pending) < 16:
+            break
+          payload_size = pending[0] | (pending[1] << 8) | (pending[2] << 16)
+          frame_buf = b''
+          pending = pending[16:]
+        else:
+          needed = payload_size - len(frame_buf)
+          take = min(needed, len(pending))
+          frame_buf += pending[:take]
+          pending = pending[take:]
+
+          if len(frame_buf) == payload_size:
+            if (len(frame_buf) > 2 and
+                frame_buf[0] == 0xff and frame_buf[1] == 0xd8 and
+                frame_buf[-2] == 0xff and frame_buf[-1] == 0xd9):
+              with open(output_path, 'wb') as f:
+                f.write(frame_buf)
+              ssock.close()
+              return True
+            frame_buf = None
+
+    ssock.close()
+  except Exception:
+    pass
+  return False
+
+
+def camera_loop(host, access_code, interval=3):
+  """continuous camera feed — grabs frames and displays via img2sixel"""
+  img2sixel = shutil.which("img2sixel")
+  if not img2sixel:
+    print("img2sixel not found — install libsixel for camera support")
+    print("  arch: paru -S libsixel")
+    print("  debian: apt install libsixel-bin")
+    sys.exit(1)
+
+  frame_path = "/tmp/printwatch_frame.jpg"
+  print("\033[2J\033[H", end="")  # clear screen
+  print("connecting to camera…")
+
+  while True:
+    if grab_frame(host, access_code, frame_path):
+      # clear screen, move cursor to top, render sixel
+      sys.stdout.write("\033[H")
+      sys.stdout.flush()
+      subprocess.run([img2sixel, "-w", "640", frame_path],
+                     stdout=sys.stdout, stderr=subprocess.DEVNULL)
+      sys.stdout.flush()
+    time.sleep(interval)
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -314,8 +398,24 @@ def main():
     help="printer serial/device ID (or set BAMBU_DEVICE_ID env var)")
   parser.add_argument("--port", type=int, default=int(os.environ.get("BAMBU_MQTT_PORT", "8883")),
     help="MQTT port (default: 8883)")
+  parser.add_argument("--camera", action="store_true",
+    help="show live camera feed (requires img2sixel, opens tmux split if in tmux)")
+  parser.add_argument("--camera-only", action="store_true",
+    help="show only the camera feed (for use in a tmux pane)")
+  parser.add_argument("--camera-interval", type=int, default=3,
+    help="seconds between camera frames (default: 3)")
   parser.add_argument("--version", action="version", version=f"printwatch {__version__}")
   args = parser.parse_args()
+
+  # camera-only mode: just show the feed, no MQTT dashboard
+  if args.camera_only:
+    if not args.ip or not args.code:
+      print("required: --ip and --code for camera")
+      sys.exit(1)
+    try:
+      camera_loop(args.ip, args.code, args.camera_interval)
+    except KeyboardInterrupt:
+      sys.exit(0)
 
   if not args.ip or not args.code or not args.id:
     parser.print_usage()
@@ -326,6 +426,17 @@ def main():
     sys.exit(1)
 
   device_id = args.id
+
+  # --camera: auto-spawn a tmux pane with the camera feed
+  if args.camera and os.environ.get("TMUX"):
+    script = os.path.abspath(sys.argv[0])
+    cam_cmd = f"{script} --camera-only --ip {args.ip} --code {args.code} --camera-interval {args.camera_interval}"
+    subprocess.Popen(["tmux", "split-window", "-h", "-l", "50%", cam_cmd],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  elif args.camera and not os.environ.get("TMUX"):
+    print("[dim]--camera works best in tmux (auto-splits a camera pane)")
+    print("without tmux, use --camera-only in a separate terminal[/dim]")
+
   console = Console()
 
   client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="printwatch")
