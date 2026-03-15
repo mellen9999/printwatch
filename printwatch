@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+# printwatch — real-time Bambu Lab printer monitor for the terminal
+# https://github.com/mellen/printwatch
+
+import argparse, os, ssl, json, time, sys, signal, subprocess
+from datetime import datetime, timedelta
+import paho.mqtt.client as mqtt
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
+from rich.console import Console, Group
+from rich import box
+
+__version__ = "1.0.0"
+
+status = {}
+connected = False
+last_update = None
+error_log = []
+last_layer = -1
+last_layer_change = None
+last_state = ""
+alerted_finish = False
+alerted_fail = False
+alerted_stuck = False
+device_id = ""
+
+STUCK_THRESHOLD = 600
+
+HMS_CODES = {
+  "0700": "FILAMENT RAN OUT — replace spool",
+  "0701": "FILAMENT TANGLED — check spool",
+  "0702": "FILAMENT CLOGGED — nozzle blocked",
+  "0300": "PRINT DETACHED FROM BED — adhesion lost",
+  "0500": "NOZZLE CLOG — plastic not flowing",
+  "0C00": "FIRST LAYER FAILED — bad adhesion or leveling",
+  "1200": "AMS FILAMENT JAM — check AMS feed",
+}
+
+STAGES = {
+  0: ("─", "dim"),
+  1: ("Idle", "dim"),
+  2: ("Auto-leveling: tapping bed to map surface", "yellow"),
+  3: ("Vibration test: tuning motors for quality", "yellow"),
+  4: ("Flow calibration: dialing in extrusion rate", "yellow"),
+  8: ("Printing", "green"),
+  14: ("Nozzle cleaning: scrubbing tip on wiper", "yellow"),
+  255: ("Printing", "green"),
+}
+
+STATES = {
+  "RUNNING":  ("PRINTING",     "bold green",  ""),
+  "FINISH":   ("DONE",         "bold cyan",   "remove from bed"),
+  "FAILED":   ("FAILED",       "bold red",    "check the printer"),
+  "PAUSE":    ("PAUSED",       "bold yellow", "resume from touchscreen"),
+  "IDLE":     ("IDLE",         "dim",         ""),
+  "PREPARE":  ("PREPARING",    "bold yellow", "heating up"),
+  "UNKNOWN":  ("CONNECTING…",  "dim",         ""),
+}
+
+
+def ding(msg):
+  sys.stdout.write("\a")
+  sys.stdout.flush()
+  try:
+    subprocess.Popen(["notify-send", "-u", "critical", "printwatch", msg],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  except FileNotFoundError:
+    pass
+
+
+def on_connect(client, userdata, flags, rc, properties=None):
+  global connected
+  connected = True
+  client.subscribe(f"device/{device_id}/report")
+  cmd = {"pushing": {"sequence_id": "0", "command": "pushall"}}
+  client.publish(f"device/{device_id}/request", json.dumps(cmd))
+
+
+def on_disconnect(client, userdata, flags, rc, properties=None):
+  global connected
+  connected = False
+
+
+def on_message(client, userdata, msg):
+  global status, last_update, last_layer, last_layer_change
+  try:
+    data = json.loads(msg.payload)
+    if "print" in data:
+      status.update(data["print"])
+    else:
+      status.update(data)
+    last_update = datetime.now()
+
+    cur_layer = status.get("layer_num", 0)
+    cur_state = status.get("gcode_state", "")
+    if cur_state == "RUNNING" and cur_layer > 0:
+      if cur_layer != last_layer:
+        last_layer = cur_layer
+        last_layer_change = datetime.now()
+      elif last_layer_change is None:
+        last_layer_change = datetime.now()
+
+    hms = status.get("hms", [])
+    if hms:
+      for h in hms:
+        code = h.get("attr", 0)
+        hex_code = f"{code:04X}" if isinstance(code, int) else str(code)
+        desc = HMS_CODES.get(hex_code[:4], f"unknown error ({hex_code})")
+        entry = f"{datetime.now().strftime('%H:%M:%S')}  {desc}"
+        if not any(desc in e for e in error_log):
+          error_log.append(entry)
+          if len(error_log) > 10:
+            error_log.pop(0)
+  except Exception:
+    pass
+
+
+def temp_gauge(current, target, width=25):
+  if target and target > 0:
+    pct = min(current / target, 1.2)
+    if pct >= 0.98:
+      color, status_txt = "green", "ready"
+    elif pct >= 0.5:
+      color, status_txt = "yellow", "heating"
+    else:
+      color, status_txt = "red", "cold"
+  else:
+    pct = min(current / 260, 1.0) if current > 0 else 0
+    color, status_txt = "dim", "off"
+
+  filled = int(min(pct, 1.0) * width)
+  bar = "█" * filled + "░" * (width - filled)
+  target_str = f"/{target:.0f}°C" if target and target > 0 else ""
+  return f"[{color}]{bar}[/]  {current:.0f}{target_str}  [{color}]{status_txt}[/]"
+
+
+def build_dashboard():
+  global last_state, alerted_finish, alerted_fail, alerted_stuck
+  raw_state = status.get("gcode_state", "UNKNOWN")
+  pct = status.get("mc_percent", 0)
+  remaining = status.get("mc_remaining_time", 0)
+  nozzle = status.get("nozzle_temper", 0)
+  nozzle_t = status.get("nozzle_target_temper", 0)
+  bed = status.get("bed_temper", 0)
+  bed_t = status.get("bed_target_temper", 0)
+  layer = status.get("layer_num", 0)
+  total_layers = status.get("total_layer_num", 0)
+  filename = status.get("subtask_name", "") or "none"
+  wifi = status.get("wifi_signal", "?")
+  fan_cool = status.get("cooling_fan_speed", "0")
+  fan_heat = status.get("heatbreak_fan_speed", "0")
+  speed = status.get("spd_mag", 100)
+  print_error = status.get("print_error", 0)
+  hms = status.get("hms", [])
+  stg_cur = status.get("stg_cur", 0)
+
+  state_label, state_color, state_desc = STATES.get(raw_state, STATES["UNKNOWN"])
+  stage_label, stage_color = STAGES.get(stg_cur, ("?", "dim"))
+
+  lines = []
+
+  if not connected:
+    lines.append(Text("  ● DISCONNECTED — printer not reachable", style="bold red"))
+    lines.append(Text("    check: is the printer on? is LAN mode enabled?", style="dim"))
+    lines.append(Text(""))
+  elif last_update and (datetime.now() - last_update).seconds > 30:
+    lines.append(Text("  ● NO DATA for 30s — printer may be busy or rebooting", style="bold yellow"))
+    lines.append(Text(""))
+
+  status_line = Text()
+  status_line.append("  ● ", style=state_color)
+  status_line.append(state_label, style=state_color)
+  if state_desc:
+    status_line.append(f"   {state_desc}", style="dim")
+  lines.append(status_line)
+
+  if raw_state == "RUNNING":
+    if pct > 0 and layer == 0 and total_layers > 0:
+      stage_text = "Calibrating (bed level / vibration / flow)"
+      stage_style = "yellow"
+    elif stage_label and stage_label not in ("─", "Idle", "idle"):
+      stage_text = stage_label
+      stage_style = stage_color
+    else:
+      stage_text = None
+      stage_style = "dim"
+
+    if stage_text:
+      stage_line = Text()
+      stage_line.append(f"    right now: ", style="dim")
+      stage_line.append(stage_text, style=stage_style)
+      lines.append(stage_line)
+
+  lines.append(Text(""))
+  lines.append(Text.from_markup(f"  [bold]file[/]     {filename}"))
+
+  if raw_state in ("RUNNING", "PAUSE") or pct > 0:
+    if total_layers > 0 and layer > 0:
+      real_pct = int(layer / total_layers * 100)
+    else:
+      real_pct = pct
+
+    bar_w = 30
+    bar_filled = int(real_pct / 100 * bar_w)
+    bar = "█" * bar_filled + "░" * (bar_w - bar_filled)
+    pct_color = "green" if real_pct > 0 else "dim"
+
+    if remaining > 0:
+      hrs = remaining // 60
+      mins = remaining % 60
+      eta_str = f"{hrs}h {mins}m left" if hrs > 0 else f"{mins}m left"
+    else:
+      eta_str = "calculating…"
+
+    lines.append(Text.from_markup(
+      f"  [bold]done[/]     [{pct_color}]{bar}[/]  [bold]{real_pct}%[/]  {eta_str}"))
+
+    if total_layers > 0:
+      lines.append(Text.from_markup(
+        f"  [bold]layer[/]    {layer} of {total_layers}  ({layer/total_layers*100:.0f}%)"))
+  elif raw_state == "FINISH":
+    lines.append(Text.from_markup(
+      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%  complete![/]"))
+
+  lines.append(Text(""))
+  lines.append(Text.from_markup(f"  [bold]nozzle[/]   {temp_gauge(nozzle, nozzle_t)}"))
+  lines.append(Text.from_markup(f"  [bold]bed[/]      {temp_gauge(bed, bed_t)}"))
+  lines.append(Text(""))
+  lines.append(Text.from_markup(
+    f"  [bold]fans[/]     part cooling: {fan_cool}%   heatbreak: {fan_heat}%"))
+  lines.append(Text.from_markup(
+    f"  [bold]speed[/]    {speed}%   [bold]wifi[/] {wifi}"))
+
+  has_alerts = False
+  if print_error and print_error != 0:
+    lines.append(Text(""))
+    lines.append(Text.from_markup(
+      f"  [bold red on white] ⚠ ERROR {print_error} [/]  check the printer!"))
+    has_alerts = True
+
+  if hms:
+    if not has_alerts:
+      lines.append(Text(""))
+    for h in hms:
+      code = h.get("attr", 0)
+      hex_code = f"{code:04X}" if isinstance(code, int) else str(code)
+      desc = HMS_CODES.get(hex_code[:4], f"unknown issue ({hex_code})")
+      lines.append(Text.from_markup(f"  [bold red on white] ⚠ {desc} [/]"))
+    has_alerts = True
+
+  if raw_state == "FAILED":
+    if not has_alerts:
+      lines.append(Text(""))
+    lines.append(Text.from_markup(
+      f"  [bold red on white] ⚠ PRINT FAILED [/]  "
+      f"stopped at layer {layer}/{total_layers} — check for jams or detachment"))
+    has_alerts = True
+    if not alerted_fail:
+      ding(f"PRINT FAILED at layer {layer}/{total_layers}")
+      alerted_fail = True
+
+  if raw_state == "FINISH" and not alerted_finish:
+    ding(f"PRINT DONE — {filename}")
+    alerted_finish = True
+
+  if raw_state == "RUNNING" and last_state in ("FINISH", "FAILED", "IDLE", ""):
+    alerted_finish = False
+    alerted_fail = False
+    alerted_stuck = False
+  last_state = raw_state
+
+  if (raw_state == "RUNNING" and last_layer_change and layer > 0
+      and (datetime.now() - last_layer_change).seconds > STUCK_THRESHOLD):
+    stuck_min = (datetime.now() - last_layer_change).seconds // 60
+    if not has_alerts:
+      lines.append(Text(""))
+    lines.append(Text.from_markup(
+      f"  [bold yellow on black] ⚠ POSSIBLY STUCK [/]  "
+      f"layer {layer} unchanged for {stuck_min}m — nozzle may be jammed"))
+    has_alerts = True
+    if not alerted_stuck:
+      ding(f"POSSIBLY STUCK on layer {layer} for {stuck_min}m")
+      alerted_stuck = True
+
+  if error_log:
+    lines.append(Text(""))
+    lines.append(Text.from_markup(f"  [bold]alert history[/]"))
+    for e in error_log[-5:]:
+      lines.append(Text.from_markup(f"    [red]●[/] {e}"))
+
+  if not has_alerts and not error_log:
+    lines.append(Text(""))
+
+  border = "red" if has_alerts else "orange1" if raw_state == "RUNNING" else "cyan" if raw_state == "FINISH" else "dim"
+
+  content = Group(*lines)
+  return Panel(content, border_style=border, box=box.HEAVY,
+               title="[bold] printwatch [/]",
+               subtitle=f"[dim] {datetime.now().strftime('%H:%M:%S')}  ·  ctrl+c to exit [/]",
+               padding=(1, 1))
+
+
+def main():
+  global device_id
+
+  parser = argparse.ArgumentParser(
+    description="real-time Bambu Lab printer monitor for the terminal")
+  parser.add_argument("--ip", default=os.environ.get("BAMBU_IP"),
+    help="printer IP address (or set BAMBU_IP env var)")
+  parser.add_argument("--code", default=os.environ.get("BAMBU_ACCESS_CODE"),
+    help="LAN access code from printer screen (or set BAMBU_ACCESS_CODE env var)")
+  parser.add_argument("--id", default=os.environ.get("BAMBU_DEVICE_ID"),
+    help="printer serial/device ID (or set BAMBU_DEVICE_ID env var)")
+  parser.add_argument("--port", type=int, default=int(os.environ.get("BAMBU_MQTT_PORT", "8883")),
+    help="MQTT port (default: 8883)")
+  parser.add_argument("--version", action="version", version=f"printwatch {__version__}")
+  args = parser.parse_args()
+
+  if not args.ip or not args.code or not args.id:
+    parser.print_usage()
+    print("\nrequired: --ip, --code, --id (or set BAMBU_IP, BAMBU_ACCESS_CODE, BAMBU_DEVICE_ID)")
+    print("\nexample:")
+    print("  printwatch --ip 192.168.1.100 --code 12345678 --id 0300CA612002150")
+    print("  BAMBU_IP=192.168.1.100 BAMBU_ACCESS_CODE=12345678 BAMBU_DEVICE_ID=0300CA612002150 printwatch")
+    sys.exit(1)
+
+  device_id = args.id
+  console = Console()
+
+  client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="printwatch")
+  client.username_pw_set("bblp", args.code)
+  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE
+  client.tls_set_context(ctx)
+  client.on_connect = on_connect
+  client.on_disconnect = on_disconnect
+  client.on_message = on_message
+  client.reconnect_delay_set(min_delay=1, max_delay=30)
+
+  try:
+    client.connect(args.ip, args.port, 60)
+  except Exception as e:
+    console.print(f"[red]cannot connect to {args.ip}:{args.port}: {e}[/]")
+    console.print(f"[dim]is the printer on? is LAN mode enabled?[/]")
+    sys.exit(1)
+
+  client.loop_start()
+
+  def cleanup(sig=None, frame=None):
+    client.loop_stop()
+    client.disconnect()
+    sys.exit(0)
+
+  signal.signal(signal.SIGINT, cleanup)
+  signal.signal(signal.SIGTERM, cleanup)
+
+  console.print("[dim]connecting to printer…[/]")
+  for _ in range(50):
+    if status:
+      break
+    time.sleep(0.1)
+
+  with Live(build_dashboard(), console=console, refresh_per_second=2,
+            screen=True) as live:
+    while True:
+      try:
+        live.update(build_dashboard())
+        time.sleep(0.5)
+      except KeyboardInterrupt:
+        cleanup()
+
+
+if __name__ == "__main__":
+  main()
