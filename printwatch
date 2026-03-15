@@ -211,7 +211,19 @@ def build_dashboard():
   lines.append(Text(""))
   lines.append(Text.from_markup(f"  [bold]file[/]     {filename}"))
 
-  if raw_state in ("RUNNING", "PAUSE") or pct > 0:
+  if raw_state == "FINISH":
+    if bed > 30:
+      finish_msg = f"bed cooling… {bed:.0f}°C → remove at 25°C"
+      finish_style = "yellow"
+    else:
+      finish_msg = "ready — flex the plate to pop it off"
+      finish_style = "bold cyan"
+    lines.append(Text.from_markup(
+      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%[/]  [{finish_style}]{finish_msg}[/]"))
+    if total_layers > 0:
+      lines.append(Text.from_markup(
+        f"  [bold]layer[/]    {total_layers} of {total_layers}  (100%)"))
+  elif raw_state in ("RUNNING", "PAUSE") or pct > 0:
     global print_start_time, first_print_layer_time
     if total_layers > 0 and layer > 0:
       real_pct = int(layer / total_layers * 100)
@@ -276,16 +288,6 @@ def build_dashboard():
     if raw_state in ("FINISH", "FAILED", "IDLE"):
       print_start_time = None
       first_print_layer_time = None
-  elif raw_state == "FINISH":
-    if bed > 30:
-      finish_msg = f"bed cooling… {bed:.0f}°C → remove at 25°C"
-      finish_style = "yellow"
-    else:
-      finish_msg = "ready — flex the plate to pop it off"
-      finish_style = "bold cyan"
-    lines.append(Text.from_markup(
-      f"  [bold]done[/]     [bold cyan]████████████████████████████████  100%[/]  [{finish_style}]{finish_msg}[/]"))
-
   lines.append(Text(""))
   lines.append(Text.from_markup(f"  [bold]nozzle[/]   {temp_gauge(nozzle, nozzle_t)}"))
   lines.append(Text.from_markup(f"  [bold]bed[/]      {temp_gauge(bed, bed_t)}"))
@@ -326,15 +328,26 @@ def build_dashboard():
   if raw_state == "FINISH" and not alerted_finish:
     ding(f"PRINT DONE — {filename}", "done")
     alerted_finish = True
-    # log to history
+    # log to history (skip if last entry is same file — avoid duplicates on restart)
     history_path = os.path.expanduser("~/.local/share/3dprint-history.log")
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
-    elapsed_str_log = ""
-    if print_start_time:
-      el = int((datetime.now() - print_start_time).total_seconds())
-      elapsed_str_log = f" | {el//3600}h{(el%3600)//60}m"
-    with open(history_path, "a") as f:
-      f.write(f"{datetime.now().isoformat(timespec='seconds')} | {filename} | L{layer}/{total_layers}{elapsed_str_log}\n")
+    should_log = True
+    try:
+      with open(history_path) as f:
+        last = f.readlines()[-1].strip() if f.readlines() else ""
+      with open(history_path) as f:
+        lines_h = f.readlines()
+        if lines_h and f"| {filename} |" in lines_h[-1]:
+          should_log = False
+    except (FileNotFoundError, IndexError):
+      pass
+    if should_log:
+      elapsed_str_log = ""
+      if print_start_time:
+        el = int((datetime.now() - print_start_time).total_seconds())
+        elapsed_str_log = f" | {el//3600}h{(el%3600)//60}m"
+      with open(history_path, "a") as f:
+        f.write(f"{datetime.now().isoformat(timespec='seconds')} | {filename} | L{layer}/{total_layers}{elapsed_str_log}\n")
 
   if raw_state == "RUNNING" and last_state in ("FINISH", "FAILED", "IDLE", ""):
     alerted_finish = False
